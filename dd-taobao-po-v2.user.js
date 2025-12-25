@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Dangdang & Taobao Order to PO Table v2.1
+// @name         Dangdang & Taobao Order to PO Table
 // @namespace    http://tampermonkey.net/dd-taobao-po-v2
-// @version      2.0
+// @version      2.1
 // @description  Convert Dangdang and Taobao order pages to PO table format
 // @connect      *
 // @run-at       document-start
@@ -931,7 +931,7 @@ if (orderData.platform === PLATFORM.TAOBAO) {
             document.body.removeChild(overlay);
         });
     }
-// ========== SEMI-AUTOMATIC TAOBAO ISBN EXTRACTION ==========
+// ========== SEMI-AUTOMATIC TAOBAO ISBN EXTRACTION (SINGLE WINDOW) ==========
 
 function startSemiAutomaticExtraction(orderData) {
     // Only queue items WITHOUT ISBN
@@ -946,9 +946,7 @@ function startSemiAutomaticExtraction(orderData) {
 
     currentQueueIndex = 0;
     extractedISBNs = {};
-    openedWindows = [];
 
-    // Count how many already have ISBNs
     const alreadyHasISBN = orderData.items.filter(item => item.isbn).length;
 
     if (isbnExtractionQueue.length === 0) {
@@ -959,17 +957,20 @@ function startSemiAutomaticExtraction(orderData) {
     // Show extraction modal
     showExtractionProgressModal(orderData, alreadyHasISBN);
 
-    // Start opening tabs
-    openNextProductPage();
+    // Open first product in a SINGLE new window
+    openNextInSingleWindow();
 }
 
-function openNextProductPage() {
+let singleExtractionWindow = null;
+let extractionTimeout = null;
+
+function openNextInSingleWindow() {
     if (currentQueueIndex >= isbnExtractionQueue.length) {
         // All done!
-        setTimeout(() => {
-            closeAllOpenedWindows();
-            completeExtraction();
-        }, 3000);
+        if (singleExtractionWindow && !singleExtractionWindow.closed) {
+            singleExtractionWindow.close();
+        }
+        completeExtraction();
         return;
     }
 
@@ -978,33 +979,56 @@ function openNextProductPage() {
     // Update progress
     updateExtractionProgress(currentQueueIndex + 1, isbnExtractionQueue.length, current.name);
 
-    // Open product page in new tab with special flag
-    const win = window.open(current.url + '&_isbn_extract=1', '_blank');
-    if (win) {
-        openedWindows.push(win);
+    // First time: open new window
+    if (!singleExtractionWindow || singleExtractionWindow.closed) {
+        singleExtractionWindow = window.open(current.url + '&_isbn_extract=1', 'isbn_extractor');
+
+        if (!singleExtractionWindow) {
+            alert('⚠️ 浏览器阻止了弹出窗口！\n\n请在浏览器地址栏右侧点击"允许弹出窗口"，然后重新点击"半自动提取ISBN"按钮。');
+            const modal = document.getElementById('extraction-modal');
+            const overlay = document.getElementById('extraction-overlay');
+            if (modal) document.body.removeChild(modal);
+            if (overlay) document.body.removeChild(overlay);
+            return;
+        }
+    } else {
+        // Reuse existing window
+        singleExtractionWindow.location.href = current.url + '&_isbn_extract=1';
     }
 
-    // Move to next after delay
-    setTimeout(() => {
-        currentQueueIndex++;
-        openNextProductPage();
-    }, 5000); // 5 second delay between opening tabs
-}
+    // Set a flag to track if we received the ISBN
+    window.waitingForISBN = true;
+    window.currentExtractionUrl = current.url;
 
-function closeAllOpenedWindows() {
-    openedWindows.forEach(win => {
-        try {
-            if (win && !win.closed) {
-                win.close();
-            }
-        } catch (e) {
-            console.log('Could not close window:', e);
+    // Safety timeout - move to next after 10 seconds even if no response
+    extractionTimeout = setTimeout(() => {
+        if (window.waitingForISBN) {
+            console.log('⚠️ Timeout waiting for ISBN from:', current.url);
+            window.waitingForISBN = false;
+            currentQueueIndex++;
+            openNextInSingleWindow();
         }
-    });
-    openedWindows = [];
+    }, 10000); // 10 second timeout
 }
 
-function showExtractionProgressModal(orderData, alreadyExtracted = 0) {
+function onISBNReceived() {
+    // Clear the timeout
+    if (extractionTimeout) {
+        clearTimeout(extractionTimeout);
+        extractionTimeout = null;
+    }
+
+    // Mark as received
+    window.waitingForISBN = false;
+
+    // Move to next item after a short delay
+    currentQueueIndex++;
+    setTimeout(() => {
+        openNextInSingleWindow();
+    }, 1000); // 1 second delay before moving to next
+}
+
+    function showExtractionProgressModal(orderData, alreadyExtracted = 0) {
     const overlay = document.createElement('div');
     overlay.id = 'extraction-overlay';
     overlay.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); z-index: 999998;';
@@ -1053,10 +1077,10 @@ function showExtractionProgressModal(orderData, alreadyExtracted = 0) {
         <div style="background: #fff7e6; border: 1px solid #ffd591; border-radius: 6px; padding: 12px; margin-bottom: 15px;">
             <div style="font-size: 13px; color: #fa8c16;">
                 ⚠️ <strong>说明:</strong><br>
-                • 脚本会自动打开缺少ISBN的商品页面<br>
-                • 请不要关闭新打开的标签页<br>
+                • 脚本会在一个窗口中依次打开商品页面<br>
+                • 请不要关闭弹出的窗口<br>
                 • ISBN会自动提取并填充<br>
-                • 完成后所有标签页会自动关闭
+                • 完成后窗口会自动关闭
             </div>
         </div>
         <div style="display: flex; justify-content: flex-end; gap: 10px;">
@@ -1069,7 +1093,9 @@ function showExtractionProgressModal(orderData, alreadyExtracted = 0) {
 
     document.getElementById('cancel-extraction-btn').addEventListener('click', () => {
         isbnExtractionQueue = [];
-        closeAllOpenedWindows();
+        if (singleExtractionWindow && !singleExtractionWindow.closed) {
+            singleExtractionWindow.close();
+        }
         document.body.removeChild(modal);
         document.body.removeChild(overlay);
     });
@@ -1097,13 +1123,19 @@ function completeExtraction() {
     const globalOrderData = window.currentOrderData;
     if (globalOrderData) {
         globalOrderData.items.forEach(item => {
-            const cleanUrl = item.url.split('&_isbn_extract')[0].split('?')[0];
-            Object.keys(extractedISBNs).forEach(extractedUrl => {
-                const extractedClean = extractedUrl.split('&_isbn_extract')[0].split('?')[0];
-                if (cleanUrl.includes(extractedClean) || extractedClean.includes(cleanUrl)) {
-                    item.isbn = extractedISBNs[extractedUrl];
-                }
-            });
+            // Extract item ID from URL (works for both taobao and tmall)
+            const itemIdMatch = item.url.match(/[?&]id=(\d+)/);
+            const itemId = itemIdMatch ? itemIdMatch[1] : null;
+
+            if (itemId) {
+                // Find matching extracted ISBN by item ID
+                Object.keys(extractedISBNs).forEach(extractedUrl => {
+                    if (extractedUrl.includes(`id=${itemId}`)) {
+                        item.isbn = extractedISBNs[extractedUrl];
+                        console.log(`✓ Matched ISBN ${item.isbn} for item ID ${itemId}`);
+                    }
+                });
+            }
         });
     }
 
@@ -1149,6 +1181,11 @@ window.addEventListener('message', function(event) {
         const { url, isbn } = event.data;
         extractedISBNs[url] = isbn;
         console.log('✓ Received ISBN:', isbn, 'for', url);
+
+        // Trigger next extraction
+        if (window.waitingForISBN) {
+            onISBNReceived();
+        }
     }
 });
 
