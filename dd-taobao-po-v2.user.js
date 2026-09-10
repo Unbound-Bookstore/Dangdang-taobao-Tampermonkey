@@ -392,6 +392,17 @@ function extractTaobaoOrderData() {
             const productName = productNameElem.textContent.trim();
             const productUrl = productLink.href;
 
+            // Extract thumbnail from background-image of the image anchor within this item row.
+            let thumbnail = '';
+            const imgAnchor = row.querySelector('a[style*="background-image"]');
+            if (imgAnchor) {
+                const bgStyle = imgAnchor.style.backgroundImage || '';
+                const bgMatch = bgStyle.match(/url\(["']?(\/\/[^"')]+)["']?\)/);
+                if (bgMatch) {
+                    thumbnail = 'https:' + bgMatch[1];
+                }
+            }
+
             // Get variant name (first info row, e.g. "占据" for a book set)
             // Use attribute prefix selector to survive CSS-module hash changes
             const infoElems = row.querySelectorAll('[class*="infoContent--"]');
@@ -467,7 +478,8 @@ function extractTaobaoOrderData() {
                 unitPrice: unitPrice.toFixed(2),
                 subtotal: subtotal.toFixed(2),
                 packageName: '',
-                isbn: isbnFromTitle || '' // Pre-fill ISBN if found in title
+                isbn: isbnFromTitle || '',
+                thumbnail: thumbnail,
             });
         });
     } else {
@@ -692,10 +704,11 @@ async function fetchISBNs(orderData, updateCallback) {
     return orderData;
 }    function formatForGoogleSheets(orderData) {
         // Header row
-        let output = `ISBN\t变体\t标题\t数量\t单价\t小计\t标签\t语言\tURL\t包裹号\n`;
+        let output = `ISBN\t变体\t标题\t数量\t单价\t小计\t缩图\t标签\t语言\tURL\t包裹号\n`;
 
         orderData.items.forEach(item => {
-            output += `${item.isbn}\t${item.variant || ''}\t${item.name}\t${item.quantity}\t${item.unitPrice}\t${item.subtotal}\t\t\t${item.url}\t${orderData.packageNumber || ''}\n`;
+            const thumbCell = item.thumbnail ? `=IMAGE("${item.thumbnail}")` : '';
+            output += `${item.isbn}\t${item.variant || ''}\t${item.name}\t${item.quantity}\t${item.unitPrice}\t${item.subtotal}\t${thumbCell}\t\t\t${item.url}\t${orderData.packageNumber || ''}\n`;
         });
 
         return output;
@@ -710,6 +723,7 @@ async function fetchISBNs(orderData, updateCallback) {
                 unitPrice: item.unitPrice,
                 subtotal: item.subtotal,
                 variant: item.variant || '',
+                thumbnail: item.thumbnail || '',
                 productName: item.name,
                 packageNumber: orderData.packageNumber || '',
                 platform: orderData.platform
@@ -804,9 +818,11 @@ async function fetchISBNs(orderData, updateCallback) {
             const statusColor = item.isbn === 'ERROR' ? '#f5222d' : (item.isbn ? '#52c41a' : '#faad14');
             const packageInfo = item.packageName ? `<span style="color: #999; font-size: 11px;">[${item.packageName}]</span> ` : '';
             const variantTag = item.variant ? `<span style="color: #1890ff; font-size: 11px; margin-right: 4px;">[${item.variant}]</span>` : '';
+            const thumbHtml = item.thumbnail ? `<img src="${item.thumbnail}" style="width:44px;height:44px;object-fit:cover;border-radius:3px;flex-shrink:0;margin-right:8px;" onerror="this.style.display='none'">` : '';
             itemsList += `<div style="padding: 8px; border-bottom: 1px solid #eee; background: ${index % 2 === 0 ? '#fff' : '#fafafa'};">
-                <div style="display: flex; justify-content: space-between; align-items: start;">
-                    <div style="flex: 1;">
+                <div style="display: flex; align-items: center;">
+                    ${thumbHtml}
+                    <div style="flex: 1; min-width: 0;">
                         <div style="font-weight: bold; font-size: 13px;">${packageInfo}${index + 1}. ${variantTag}${item.name}</div>
                         <div style="font-size: 11px; color: #999; margin-top: 2px;">数量: ${item.quantity} | 单价: ¥${item.unitPrice} | 小计: ¥${item.subtotal}</div>
                     </div>
