@@ -323,163 +323,106 @@ function extractTaobaoOrderData() {
         items: []
     };
 
-    let orderNumber = "";
+    // The page may list multiple orders — iterate each order container separately
+    // so each item gets the correct orderNumber and sellerName.
+    const orderContainers = document.querySelectorAll('[id^="shopOrderContainer_"]');
 
-    // (1) Try NEW structure first - shopInfoOrderId
-    const orderIdElem = document.querySelector('.shopInfoOrderId--CVDgDEO2');
-    if (orderIdElem) {
-        const match = orderIdElem.textContent.match(/订单号[:：]?\s*(\d{10,})/);
-        if (match) {
-            orderNumber = match[1];
-        }
-    }
+    if (orderContainers.length > 0) {
+        console.log(`Found ${orderContainers.length} order containers (NEW structure)`);
 
-    // (2) Try old data-id on trade order wrapper
-    if (!orderNumber) {
-        const tradeWrapper = document.querySelector('[data-id][class*="trade-order"]');
-        if (tradeWrapper) {
-            orderNumber = tradeWrapper.getAttribute('data-id');
-        }
-    }
+        orderContainers.forEach(container => {
+            // Extract order number from this container
+            let orderNumber = '';
+            const orderIdElem = container.querySelector('[class*="shopInfoOrderId--"]');
+            if (orderIdElem) {
+                const m = orderIdElem.textContent.match(/订单号[:：]?\s*(\d{10,})/);
+                if (m) orderNumber = m[1];
+            }
 
-    // (3) Fallback: text search
-    if (!orderNumber) {
-        const textNodes = document.querySelectorAll('body *');
-        for (const el of textNodes) {
-            if (el.textContent && el.textContent.includes("订单号")) {
-                const m = el.textContent.match(/订单号[:：]?\s*(\d{10,})/);
-                if (m) {
-                    orderNumber = m[1];
-                    break;
+            // Extract seller name from this container
+            let sellerName = '';
+            const sellerLink = container.querySelector('[data-spm="order_shopname"] a') ||
+                               container.querySelector('[class*="shopInfoName--"]');
+            if (sellerLink) sellerName = sellerLink.textContent.trim();
+
+            console.log(`Order ${orderNumber} | Seller: ${sellerName}`);
+
+            // Set on orderData for single-order pages (last one wins, but items carry their own)
+            if (orderNumber) orderData.orderNumber = orderNumber;
+            if (sellerName) orderData.sellerName = sellerName;
+
+            // Scope to the orderDetailCol_ sub-container to exclude recommendation sections
+            // (which also live inside shopOrderContainer_ but contain unrelated products)
+            const orderDetailCol = container.querySelector('[id^="orderDetailCol_"]');
+            const searchRoot = orderDetailCol || container;
+
+            // Match only the top-level item row (class starts with "itemInfo--" but NOT "itemInfoCol")
+            const allInfoElems = searchRoot.querySelectorAll('[class*="itemInfo--"]');
+            const itemRows = Array.from(allInfoElems).filter(el =>
+                Array.from(el.classList).some(c => /^itemInfo--/.test(c) && !/^itemInfoCol/.test(c))
+            );
+            itemRows.forEach(row => {
+                const productLink = row.querySelector('[class*="title--"]');
+                if (!productLink) return;
+                const productNameElem = productLink.querySelector('[class*="titleText--"]');
+                if (!productNameElem) return;
+
+                const productName = productNameElem.textContent.trim();
+                const productUrl = productLink.href;
+
+                // Thumbnail
+                let thumbnail = '';
+                const imgAnchor = row.querySelector('a[style*="background-image"]');
+                if (imgAnchor) {
+                    const bgMatch = (imgAnchor.style.backgroundImage || '').match(/url\(["']?(\/\/[^"')]+)["']?\)/);
+                    if (bgMatch) thumbnail = 'https:' + bgMatch[1];
                 }
-            }
-        }
-    }
 
-    orderData.orderNumber = orderNumber;
+                // Variant: first infoContent only when 2+ exist
+                const infoElems = row.querySelectorAll('[class*="infoContent--"]');
+                const variant = infoElems.length >= 2 ? infoElems[0].textContent.trim() : '';
 
-    // Extract seller name - try NEW structure first
-    let sellerLink = document.querySelector('.shopInfoName--SoysxOyw');
-    if (!sellerLink) {
-        // Fallback to old structure
-        sellerLink = document.querySelector('.seller-mod__name___1_wwa');
-    }
-    if (sellerLink) {
-        orderData.sellerName = sellerLink.textContent.trim();
-    }
+                console.log("FOUND PRODUCT:", productName, productUrl, variant ? `[variant: ${variant}]` : '');
 
-    // Extract items - try NEW structure first
-    let itemRows = document.querySelectorAll('.itemInfo--cOJabuHA');
+                // Price
+                const priceContainer = row.querySelector('[class*="itemInfoColPrice--"]');
+                if (!priceContainer) { console.log("SKIP ROW — no price container"); return; }
 
-    // If NEW structure found, use new extraction logic
-    if (itemRows.length > 0) {
-        console.log(`Found ${itemRows.length} items in NEW Taobao structure`);
-
-        itemRows.forEach(row => {
-            // Get product name and URL
-            const productLink = row.querySelector('.title--pLEC2yiw');
-            if (!productLink) {
-                console.log("SKIP ROW — no product link found");
-                return;
-            }
-
-            const productNameElem = productLink.querySelector('.titleText--W0CIPGbq');
-            if (!productNameElem) {
-                console.log("SKIP ROW — no product name found");
-                return;
-            }
-
-            const productName = productNameElem.textContent.trim();
-            const productUrl = productLink.href;
-
-            // Extract thumbnail from background-image of the image anchor within this item row.
-            let thumbnail = '';
-            const imgAnchor = row.querySelector('a[style*="background-image"]');
-            if (imgAnchor) {
-                const bgStyle = imgAnchor.style.backgroundImage || '';
-                const bgMatch = bgStyle.match(/url\(["']?(\/\/[^"')]+)["']?\)/);
-                if (bgMatch) {
-                    thumbnail = 'https:' + bgMatch[1];
+                const priceWraps = priceContainer.querySelectorAll('[class*="priceWrap--"]');
+                let unitPrice = 0;
+                if (priceWraps[0]) {
+                    const int_ = priceWraps[0].querySelector('.trade-price-integer');
+                    const dec_ = priceWraps[0].querySelector('.trade-price-decimal');
+                    unitPrice = parseFloat(`${int_ ? int_.textContent.trim() : '0'}.${dec_ ? dec_.textContent.trim() : '00'}`);
                 }
-            }
 
-            // Get variant name (first info row, e.g. "占据" for a book set)
-            // Use attribute prefix selector to survive CSS-module hash changes
-            const infoElems = row.querySelectorAll('[class*="infoContent--"]');
-            // Only treat first row as variant when there are 2+ info rows.
-            // A single info row is service text (e.g. "假一赔四"), not a variant name.
-            const variant = infoElems.length >= 2 ? infoElems[0].textContent.trim() : '';
+                const quantityElem = priceContainer.querySelector('[class*="quantity--"]');
+                let quantity = 1;
+                if (quantityElem) {
+                    const qm = quantityElem.textContent.match(/x(\d+)/);
+                    if (qm) quantity = parseInt(qm[1]);
+                }
 
-            console.log("FOUND PRODUCT:", productName, productUrl, variant ? `[variant: ${variant}]` : '');
+                const subtotal = unitPrice * quantity;
 
-            // Get price container
-            const priceContainer = row.querySelector('.itemInfoColPrice--b9wc2Zg0');
-            if (!priceContainer) {
-                console.log("SKIP ROW — no price container found");
-                return;
-            }
+                let isbnFromTitle = extractISBNFromText(productName) ||
+                                    extractISBNFromText(row.innerText || row.textContent);
 
-            // Get all price elements (first one is actual price, second is original price)
-            const priceWraps = priceContainer.querySelectorAll('.priceWrap--m0dTKjs3');
+                console.log(`  单价: ¥${unitPrice.toFixed(2)}, 数量: ${quantity}, 小计: ¥${subtotal.toFixed(2)}`);
 
-            let unitPrice = 0;
-            let originalPrice = 0;
-
-            // First price wrap = actual price paid (实付单价)
-            if (priceWraps[0]) {
-                const integerPart = priceWraps[0].querySelector('.trade-price-integer');
-                const decimalPart = priceWraps[0].querySelector('.trade-price-decimal');
-                const integer = integerPart ? integerPart.textContent.trim() : '0';
-                const decimal = decimalPart ? decimalPart.textContent.trim() : '00';
-                unitPrice = parseFloat(`${integer}.${decimal}`);
-            }
-
-            // Second price wrap = original price (with strikethrough) - optional
-            if (priceWraps[1]) {
-                const integerPart = priceWraps[1].querySelector('.trade-price-integer');
-                const decimalPart = priceWraps[1].querySelector('.trade-price-decimal');
-                const integer = integerPart ? integerPart.textContent.trim() : '0';
-                const decimal = decimalPart ? decimalPart.textContent.trim() : '00';
-                originalPrice = parseFloat(`${integer}.${decimal}`);
-            }
-
-            // Get quantity
-            const quantityElem = priceContainer.querySelector('.quantity--YK5QLtR2');
-            let quantity = 1;
-            if (quantityElem) {
-                const qtyMatch = quantityElem.textContent.match(/x(\d+)/);
-                if (qtyMatch) quantity = parseInt(qtyMatch[1]);
-            }
-
-            // Calculate subtotal
-            const subtotal = unitPrice * quantity;
-
-            // ========== PRESERVE ISBN LOGIC ==========
-            let isbnFromTitle = null;
-
-            // 1. Try product name first
-            isbnFromTitle = extractISBNFromText(productName);
-
-            // 2. If not found, try the entire row text
-            if (!isbnFromTitle) {
-                const rowText = row.innerText || row.textContent;
-                isbnFromTitle = extractISBNFromText(rowText);
-            }
-
-            // DEBUG: Log what we're setting
-            console.log(`  单价: ¥${unitPrice.toFixed(2)}, 数量: ${quantity}, 小计: ¥${subtotal.toFixed(2)}`);
-            console.log(`  ISBN extracted: "${isbnFromTitle}"`);
-
-            orderData.items.push({
-                name: productName,
-                variant: variant,
-                url: productUrl,
-                quantity: quantity.toString(),
-                unitPrice: unitPrice.toFixed(2),
-                subtotal: subtotal.toFixed(2),
-                packageName: '',
-                isbn: isbnFromTitle || '',
-                thumbnail: thumbnail,
+                orderData.items.push({
+                    name: productName,
+                    variant: variant,
+                    url: productUrl,
+                    quantity: quantity.toString(),
+                    unitPrice: unitPrice.toFixed(2),
+                    subtotal: subtotal.toFixed(2),
+                    packageName: '',
+                    isbn: isbnFromTitle || '',
+                    thumbnail: thumbnail,
+                    orderNumber: orderNumber,
+                    sellerName: sellerName,
+                });
             });
         });
     } else {
@@ -704,11 +647,14 @@ async function fetchISBNs(orderData, updateCallback) {
     return orderData;
 }    function formatForGoogleSheets(orderData) {
         // Header row
-        let output = `ISBN\t变体\t标题\t数量\t单价\t小计\t缩图\t标签\t语言\tURL\t包裹号\n`;
+        let output = `ISBN\t变体\t标题\t数量\t单价\t小计\t缩图\t标签\t语言\tURL\t包裹号\t订单号\t卖家\n`;
 
         orderData.items.forEach(item => {
             const thumbCell = item.thumbnail ? `=IMAGE("${item.thumbnail}")` : '';
-            output += `${item.isbn}\t${item.variant || ''}\t${item.name}\t${item.quantity}\t${item.unitPrice}\t${item.subtotal}\t${thumbCell}\t\t\t${item.url}\t${orderData.packageNumber || ''}\n`;
+            // Per-item orderNumber/sellerName (multi-order page); fall back to orderData-level for Dangdang
+            const itemOrderNumber = item.orderNumber || orderData.orderNumber || '';
+            const itemSellerName = item.sellerName || orderData.sellerName || '';
+            output += `${item.isbn}\t${item.variant || ''}\t${item.name}\t${item.quantity}\t${item.unitPrice}\t${item.subtotal}\t${thumbCell}\t\t\t${item.url}\t${orderData.packageNumber || ''}\t${itemOrderNumber}\t${itemSellerName}\n`;
         });
 
         return output;
@@ -726,6 +672,8 @@ async function fetchISBNs(orderData, updateCallback) {
                 thumbnail: item.thumbnail || '',
                 productName: item.name,
                 packageNumber: orderData.packageNumber || '',
+                orderNumber: item.orderNumber || orderData.orderNumber || '',
+                sellerName: item.sellerName || orderData.sellerName || '',
                 platform: orderData.platform
             };
         });
@@ -1005,9 +953,11 @@ function openNextInSingleWindow() {
     // Update progress
     updateExtractionProgress(currentQueueIndex + 1, isbnExtractionQueue.length, current.name);
 
+    const extractUrl = current.url + '&_isbn_extract=1';
+
     // First time: open new window
     if (!singleExtractionWindow || singleExtractionWindow.closed) {
-        singleExtractionWindow = window.open(current.url + '&_isbn_extract=1', 'isbn_extractor');
+        singleExtractionWindow = window.open(extractUrl, 'isbn_extractor');
 
         if (!singleExtractionWindow) {
             alert('⚠️ 浏览器阻止了弹出窗口！\n\n请在浏览器地址栏右侧点击"允许弹出窗口"，然后重新点击"半自动提取ISBN"按钮。');
@@ -1019,7 +969,7 @@ function openNextInSingleWindow() {
         }
     } else {
         // Reuse existing window
-        singleExtractionWindow.location.href = current.url + '&_isbn_extract=1';
+        singleExtractionWindow.location.href = extractUrl;
     }
 
     // Set a flag to track if we received the ISBN
@@ -1204,9 +1154,27 @@ function completeExtraction() {
 // Listen for ISBN data from product pages
 window.addEventListener('message', function(event) {
     if (event.data.type === 'TAOBAO_ISBN_FOUND') {
-        const { url, isbn } = event.data;
-        extractedISBNs[url] = isbn;
-        console.log('✓ Received ISBN:', isbn, 'for', url);
+        const { isbn } = event.data;
+        // Store using the original URL we opened so completeExtraction() can match by id=
+        const key = window.currentExtractionUrl || event.data.url;
+        extractedISBNs[key] = isbn;
+        console.log('✓ Received ISBN:', isbn, 'for', key);
+
+        // Also write directly into the item now, before completeExtraction() runs,
+        // in case URL matching fails later (e.g. Taobao rewrites the URL)
+        if (window.currentOrderData && key) {
+            const idMatch = key.match(/[?&]id=(\d+)/);
+            if (idMatch) {
+                const targetId = idMatch[1];
+                window.currentOrderData.items.forEach(item => {
+                    const itemIdMatch = item.url.match(/[?&]id=(\d+)/);
+                    if (itemIdMatch && itemIdMatch[1] === targetId) {
+                        item.isbn = isbn;
+                        console.log('✓ Directly wrote ISBN', isbn, 'to item id=', targetId);
+                    }
+                });
+            }
+        }
 
         // Trigger next extraction
         if (window.waitingForISBN) {

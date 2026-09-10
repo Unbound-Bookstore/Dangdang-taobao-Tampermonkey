@@ -14,9 +14,14 @@
 (function() {
     'use strict';
 
-    // Check if this is an auto-extraction request
+    // Check if this is an auto-extraction request.
+    // _isbn_extract param may be lost on Taobao→Tmall redirects.
+    // Use window.name to persist the flag — it survives cross-origin navigations in the same window.
     const urlParams = new URLSearchParams(window.location.search);
-    const isAutoExtract = urlParams.has('_isbn_extract');
+    if (urlParams.has('_isbn_extract')) {
+        window.name = 'isbn_extractor';
+    }
+    const isAutoExtract = urlParams.has('_isbn_extract') || window.name === 'isbn_extractor';
 
     GM_addStyle(`
         #isbn-box {
@@ -117,7 +122,7 @@
                     ${isAuto ? '<div style="font-size: 11px; opacity: 0.9; margin-bottom: 5px;">🤖 自动提取模式</div>' : ''}
                     <div style="font-size: 12px; opacity: 0.85;">📚 ISBN</div>
                     <div style="font-size: 20px; font-weight: bold; margin: 8px 0; font-family: monospace;">${isbn}</div>
-                    ${isAuto ? '<div style="font-size: 11px; opacity: 0.8;">已发送到主窗口 · 3秒后关闭</div>' : '<div style="font-size: 11px; opacity: 0.8;">点击复制</div>'}
+                    ${isAuto ? '<div style="font-size: 11px; opacity: 0.8;">已发送到主窗口 · 等待下一个...</div>' : '<div style="font-size: 11px; opacity: 0.8;">点击复制</div>'}
                 </div>
             `;
 
@@ -129,26 +134,15 @@
                     box.innerHTML = '<div style="text-align: center;">✓ 已复制!</div>';
                     setTimeout(() => box.innerHTML = orig, 1500);
                 };
-            } else {
-                // Auto-close after 3 seconds in auto mode
-                setTimeout(() => {
-                    window.close();
-                }, 3000);
             }
         } else {
             box.innerHTML = `
                 <div style="text-align: center;">
                     <div style="font-size: 24px;">❌</div>
                     <div style="font-size: 13px; margin-top: 5px;">未找到ISBN</div>
-                    ${isAuto ? '<div style="font-size: 11px; opacity: 0.8; margin-top: 5px;">3秒后自动关闭</div>' : ''}
+                    ${isAuto ? '<div style="font-size: 11px; opacity: 0.8; margin-top: 5px;">等待下一个...</div>' : ''}
                 </div>
             `;
-
-            if (isAuto) {
-                setTimeout(() => {
-                    window.close();
-                }, 3000);
-            }
         }
 
         document.body.appendChild(box);
@@ -160,6 +154,7 @@
 
         // If auto-extract mode, send ISBN to opener
         if (isAutoExtract && window.opener) {
+            // Don't clear window.name — the order script reuses this window for the next item
             if (isbn) {
                 window.opener.postMessage({
                     type: 'TAOBAO_ISBN_FOUND',
